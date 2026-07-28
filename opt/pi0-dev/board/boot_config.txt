@@ -29,3 +29,8 @@ dtoverlay=dwc2,dr_mode=peripheral
 
 # HDMI console output even when the display is plugged in after boot
 hdmi_force_hotplug=1
+
+# Bluetooth only: it owns /dev/ttyAMA0, which the SEC1210 reader needs. Wifi is
+# left enabled on purpose - dev images use it for SSH, and stock intends that.
+dtoverlay=disable-bt
+dtoverlay=mmc

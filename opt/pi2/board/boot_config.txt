@@ -21,3 +21,9 @@ disable_splash=1
 # https://github.com/raspberrypi/firmware/blob/master/boot/overlays/README
 dtoverlay=disable-wifi
 dtoverlay=disable-bt
+# The SEC1210 reader is a *serial* CCID device on /dev/ttyAMA0 (the PL011 UART).
+# On Pi Zero W / Zero 2 W / Pi 3+ that UART belongs to Bluetooth by default, so
+# disabling BT is required for the reader to work at all, not just hardening.
+
+# bcm2835_mmc does not abusively poll when the MicroSD is removed.
+dtoverlay=mmc

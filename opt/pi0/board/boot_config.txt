@@ -17,3 +17,13 @@ dtparam=spi=on
 boot_delay=0
 disable_splash=1
 force_turbo=1
+# The SEC1210 smartcard reader is a *serial* CCID device on /dev/ttyAMA0, which is
+# the PL011 UART. On Pi Zero W, Zero 2 W and Pi 3+ that UART is wired to Bluetooth
+# by default, so disabling BT is required for the reader to work at all - it is not
+# only a hardening choice. Wifi goes too: this device has no business having either.
+dtoverlay=disable-wifi
+dtoverlay=disable-bt
+
+# Use bcm2835_mmc rather than sdhost, which does not abusively poll when the
+# MicroSD is removed - and SeedSigner is normally run with the card out.
+dtoverlay=mmc
