@@ -1,55 +1,102 @@
 #!/bin/sh
 # Provides: smartcard self-test to the boot partition
 #
-# Opt-in. Does nothing unless a file named `smartcard-selftest` exists on the
-# boot (FAT) partition, so a normal boot writes nothing at all - this is a
-# signing device and unrequested writes to the card are a liability.
+# Opt-in. Does nothing unless a file whose name starts with `smartcard-selftest`
+# exists on the boot (FAT) partition, so a normal boot writes nothing at all -
+# this is a signing device and unrequested writes to the card are a liability.
 #
-# Why this exists: a Pi Zero 1.3 has no video output, no radio, and its USB
-# ethernet gadget does not bind on Windows (which attaches usbser.sys instead of
-# RNDIS). Writing the report to the FAT partition is the only way to get
-# diagnostics off it - pull the card, read the file on any computer.
+# The marker is matched as a GLOB, not an exact name. Windows hides known file
+# extensions by default, so "create a file called smartcard-selftest" reliably
+# produces smartcard-selftest.txt instead - which an exact match silently
+# ignores, mounting the card and unmounting it again with no trace. Accept any
+# suffix and any case.
 #
-# Runs at S90, after pcscd (S01) and after the app has been launched (S02), so
-# it never delays boot.
+# Why this exists at all: a Pi Zero 1.3 has no video output, no radio, and its
+# USB ethernet gadget does not bind on Windows (the host attaches usbser.sys and
+# offers a COM port instead of a network adapter). Writing to the FAT partition
+# is the only way to get diagnostics off the device.
+#
+# Runs at S90, after pcscd (S01) and after the app is launched (S02), so it never
+# delays boot.
 
-MARKER=smartcard-selftest
 RESULT=smartcard-selftest-result.txt
 MNT=/mnt/selftest
-DEV=/dev/mmcblk0p1
+LOG=/tmp/selftest.log
 
 start() {
-    [ -b "$DEV" ] || return 0
+    # Everything below reports into $LOG, which is copied to the card. Failures
+    # used to be swallowed by `2>/dev/null || return 0`, which made a script that
+    # did nothing indistinguishable from a script that never ran.
+    : > "$LOG"
+    say() { echo "$*" >> "$LOG"; }
+
+    say "S90selftest $(date 2>/dev/null)"
+
+    dev=""
+    for d in /dev/mmcblk0p1 /dev/mmcblk0p2 /dev/sda1; do
+        [ -b "$d" ] && { dev="$d"; break; }
+    done
+    if [ -z "$dev" ]; then
+        say "no block device found; nothing to do"
+        return 0
+    fi
+    say "block device: $dev"
 
     mkdir -p "$MNT"
-    mount -t vfat -o rw "$DEV" "$MNT" 2>/dev/null || return 0
+    if ! mount -t vfat -o rw "$dev" "$MNT" 2>>"$LOG"; then
+        say "mount failed - cannot read the marker or write a result"
+        return 0
+    fi
 
-    if [ ! -e "$MNT/$MARKER" ]; then
-        # Not requested. Leave the card exactly as we found it.
+    # Glob, case-insensitively, for anything starting with the marker name.
+    marker=""
+    for f in "$MNT"/smartcard-selftest* "$MNT"/SMARTCARD-SELFTEST*; do
+        # Skip our own output, and skip the unmatched-glob literal.
+        case "$f" in
+            *"$RESULT") continue ;;
+            *'*') continue ;;
+        esac
+        [ -f "$f" ] && { marker="$f"; break; }
+    done
+
+    if [ -z "$marker" ]; then
         umount "$MNT" 2>/dev/null
         return 0
     fi
 
-    echo "Running smartcard self-test (requested by $MARKER)"
-    # pcscd gets a moment to come up and probe the serial reader before we ask.
+    echo "Running smartcard self-test (requested by $(basename "$marker"))"
+    say "marker: $marker"
+
+    # Give pcscd a moment to come up and probe the serial reader.
     sleep 5
-    smartcard-selftest > "$MNT/$RESULT" 2>&1
-    echo "self-test written to $RESULT on the boot partition"
 
-    # Consume the marker so it runs once per request rather than every boot.
-    rm -f "$MNT/$MARKER"
+    if smartcard-selftest >> "$LOG" 2>&1; then
+        say "-- self-test completed --"
+    else
+        say "-- self-test exited non-zero ($?) - partial report above --"
+    fi
+
+    cp "$LOG" "$MNT/$RESULT" 2>>"$LOG"
     sync
-    umount "$MNT" 2>/dev/null
-}
 
-stop() {
-    :
+    # Only consume the marker once a result is actually on the card. Removing it
+    # first meant a failed write left the user with neither a result nor a
+    # trigger, and no way to tell which.
+    if [ -s "$MNT/$RESULT" ]; then
+        rm -f "$marker"
+        sync
+        echo "self-test written to $RESULT"
+    else
+        echo "self-test produced no output; marker left in place for a retry"
+    fi
+
+    umount "$MNT" 2>/dev/null
 }
 
 case "$1" in
     start)   start ;;
-    stop)    stop ;;
+    stop)    : ;;
     restart) start ;;
     *)       echo "Usage: $0 {start|stop|restart}"; exit 5 ;;
 esac
-exit $?
+exit 0
