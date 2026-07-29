@@ -31,3 +31,8 @@ hdmi_force_hotplug=1
 # left enabled on purpose - dev images use it for SSH, and stock intends that.
 dtoverlay=disable-bt
 dtoverlay=mmc
+
+# Same requirement as the pi0 image: freeing the UART is not enough, the
+# firmware must also initialise it and hold its clock steady or the reader
+# answers erratically.
+enable_uart=1

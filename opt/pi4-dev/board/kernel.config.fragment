@@ -77,3 +77,17 @@ CONFIG_EXT4_FS=y
 CONFIG_REGULATOR=y
 CONFIG_REGULATOR_FIXED_VOLTAGE=y
 CONFIG_REGULATOR_GPIO=y
+
+# Pi 4 onboard gigabit ethernet (bcmgenet + its BCM54213PE PHY).
+# The rest of this fragment covers USB ethernet adapters and wifi, but not the
+# Pi 4's own jack - the release config leaves CONFIG_BCMGENET commented out, so
+# without this there is no eth0 at all and S35network has nothing to DHCP on.
+# Wired is the point of this image: it is the one link that works with both
+# radios off and the SEC1210 holding the only serial port.
+CONFIG_NET_VENDOR_BROADCOM=y
+CONFIG_BCMGENET=y
+CONFIG_PHYLIB=y
+CONFIG_BROADCOM_PHY=y
+CONFIG_BCM_NET_PHYLIB=y
+CONFIG_MDIO_BCM_UNIMAC=y
+CONFIG_FIXED_PHY=y
