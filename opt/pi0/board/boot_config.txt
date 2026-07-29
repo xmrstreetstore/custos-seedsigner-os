@@ -24,6 +24,12 @@ force_turbo=1
 dtoverlay=disable-wifi
 dtoverlay=disable-bt
 
+# Freeing the UART is not enough on its own: the firmware must also initialise
+# it and hold its clock steady, or the baud rate drifts and the reader answers
+# erratically. force_turbo=1 above already pins the core clock, but state the
+# requirement explicitly rather than depending on that side effect.
+enable_uart=1
+
 # Use bcm2835_mmc rather than sdhost, which does not abusively poll when the
 # MicroSD is removed - and SeedSigner is normally run with the card out.
 dtoverlay=mmc

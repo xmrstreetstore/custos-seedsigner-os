@@ -1,0 +1,17 @@
+# Serial support for the SEC1210 smartcard reader.
+#
+# The stock pi0 kernel config strips every serial driver - reasonably, since a
+# plain SeedSigner needs none. But the SEC1210 is a *serial* CCID device on the
+# PL011 UART, so without this driver /dev/ttyAMA0 never appears, pcscd's
+# libccidtwin cannot open the port, and the reader does not exist as far as the
+# system is concerned. Freeing the UART in boot_config.txt achieves nothing if
+# there is no driver behind it.
+#
+# The other boards (pi02w, pi2, pi4) already build this in; pi0 was the only
+# one that did not, and pi0 is the target here.
+CONFIG_SERIAL_AMBA_PL011=y
+
+# Deliberately no console on this port. The reader owns the UART, and a getty
+# or kernel log sharing it would corrupt APDUs in both directions. cmdline.txt
+# carries no console= either, so nothing else claims it.
+# CONFIG_SERIAL_AMBA_PL011_CONSOLE is not set

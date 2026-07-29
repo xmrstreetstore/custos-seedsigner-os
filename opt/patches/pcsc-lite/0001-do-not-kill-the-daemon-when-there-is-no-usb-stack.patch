@@ -1,0 +1,59 @@
+From: Custos OS build
+Subject: [PATCH] hotplug: do not kill the daemon when there is no USB stack
+
+pcscd runs its USB hotplug thread whenever it was built with libusb, and
+libusb is pulled in by the ccid package whether or not a USB reader is ever
+used. On a device whose kernel has no USB support at all there is no usbfs
+for libusb to find, libusb_init() fails, and pcscd kills its own process:
+
+    Log2(PCSC_LOG_CRITICAL, "libusb_init failed: %s", ...);
+    /* emergency exit */
+    kill(getpid(), SIGTERM);
+
+That is a sensible default on a desktop, where every reader is USB and a dead
+libusb means the daemon can do nothing useful. It is wrong here. The SEC1210
+is a *serial* CCID reader, declared in reader.conf.d and already initialised
+by the time this thread runs; upstream's suicide throws away a working reader
+and every client then fails with SCARD_E_NO_SERVICE (0x8010001D) because no
+daemon is left to talk to.
+
+The kill() is also load-bearing in a way that is easy to miss, so it cannot
+simply be deleted. HPSearchHotPluggables() creates the pipe, starts this
+thread, and then blocks:
+
+    /* Wait for initial readers to setup */
+    if (read(pipefd[0], &c, 1) == -1)
+
+Returning early without writing to that pipe would leave the daemon hung at
+startup rather than dead - the same SCARD_E_NO_SERVICE, harder to diagnose.
+So write the handshake byte first, exactly as the success path does, and only
+then stop the thread. The caller carries on with the readers it already has,
+USB hotplug is simply absent, and serial readers keep working.
+
+--- a/src/hotplug_libusb.c
++++ b/src/hotplug_libusb.c
+@@ -483,8 +483,22 @@
+ 	if (r < 0)
+ 	{
+ 		Log2(PCSC_LOG_CRITICAL, "libusb_init failed: %s", libusb_error_name(r));
+-		/* emergency exit */
+-		kill(getpid(), SIGTERM);
++
++		/*
++		 * No USB stack on this system. Serial readers from reader.conf.d
++		 * have already been initialised and remain usable, so keep the
++		 * daemon alive and simply do without hotplug.
++		 */
++		Log1(PCSC_LOG_INFO,
++			"no USB support: continuing with serial readers only");
++
++		/*
++		 * HPSearchHotPluggables() is blocked reading this pipe. It must be
++		 * released or the daemon hangs at startup instead of finishing it.
++		 */
++		if (write(pipefd[1], &c, 1) == -1)
++			Log2(PCSC_LOG_ERROR, "write: %s", strerror(errno));
++
+ 		return NULL;
+ 	}
+ 
