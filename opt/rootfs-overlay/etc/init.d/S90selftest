@@ -1,0 +1,55 @@
+#!/bin/sh
+# Provides: smartcard self-test to the boot partition
+#
+# Opt-in. Does nothing unless a file named `smartcard-selftest` exists on the
+# boot (FAT) partition, so a normal boot writes nothing at all - this is a
+# signing device and unrequested writes to the card are a liability.
+#
+# Why this exists: a Pi Zero 1.3 has no video output, no radio, and its USB
+# ethernet gadget does not bind on Windows (which attaches usbser.sys instead of
+# RNDIS). Writing the report to the FAT partition is the only way to get
+# diagnostics off it - pull the card, read the file on any computer.
+#
+# Runs at S90, after pcscd (S01) and after the app has been launched (S02), so
+# it never delays boot.
+
+MARKER=smartcard-selftest
+RESULT=smartcard-selftest-result.txt
+MNT=/mnt/selftest
+DEV=/dev/mmcblk0p1
+
+start() {
+    [ -b "$DEV" ] || return 0
+
+    mkdir -p "$MNT"
+    mount -t vfat -o rw "$DEV" "$MNT" 2>/dev/null || return 0
+
+    if [ ! -e "$MNT/$MARKER" ]; then
+        # Not requested. Leave the card exactly as we found it.
+        umount "$MNT" 2>/dev/null
+        return 0
+    fi
+
+    echo "Running smartcard self-test (requested by $MARKER)"
+    # pcscd gets a moment to come up and probe the serial reader before we ask.
+    sleep 5
+    smartcard-selftest > "$MNT/$RESULT" 2>&1
+    echo "self-test written to $RESULT on the boot partition"
+
+    # Consume the marker so it runs once per request rather than every boot.
+    rm -f "$MNT/$MARKER"
+    sync
+    umount "$MNT" 2>/dev/null
+}
+
+stop() {
+    :
+}
+
+case "$1" in
+    start)   start ;;
+    stop)    stop ;;
+    restart) start ;;
+    *)       echo "Usage: $0 {start|stop|restart}"; exit 5 ;;
+esac
+exit $?
