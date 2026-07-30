@@ -1,0 +1,409 @@
+Supply pygp crypto primitives from pycryptodomex, not cryptography
+
+pygp imports cryptography purely as a primitive provider, but on a
+SeedSigner-class device that import is the most expensive thing in the build:
+cryptography ships a Rust extension built with maturin, so enabling it means
+carrying a whole Rust toolchain through the build and putting another 8-12 MB
+into a rootfs that is an initramfs - i.e. permanently resident in RAM on a
+512 MB Pi Zero.
+
+It also asks for far more than pygp uses. Across pygp, its gp/ layer and its
+connection/ layer, the only primitives ever called are AES and 3DES in ECB/CBC,
+AES-CMAC, the SHA family, HMAC and os.urandom. Every RSA, DSA, EC and DH helper
+in pygp/crypto.py is unreachable: nothing in the package calls one.
+
+So this adds pygp/_crypto_backend.py, which implements that symmetric surface on
+pycryptodomex - already in the image for pysatochip - behind the same API shapes
+cryptography exposes, and repoints crypto.py's import block at it. Every function
+body in crypto.py is left exactly as upstream wrote it.
+
+Two details that are easy to get wrong and are handled deliberately:
+
+  - cryptography's TripleDES expands short keys itself, 8 bytes to K1K1K1 and
+    16 to K1K2K1, and pygp depends on that: DES_CBC and DES_ECB are wrappers
+    that forward to the DES3 versions, and MAC3 hands an 8-byte key to
+    DES_INV_ECB. The backend expands the same way.
+  - pycryptodomex refuses a 3DES key whose three parts are equal, which is
+    exactly what an expanded 8-byte key looks like, so that case is routed to
+    single DES - the identical computation - instead of failing.
+
+Verified against FIPS 81 for DES, FIPS 197 for AES, RFC 4493 for AES-CMAC,
+RFC 2202 for HMAC-SHA1, and the published SHA-1/224/256/384/512 digests of
+"abc"; plus checks that a 3DES key with K1=K2=K3 collapses to single DES, that
+2-key 3DES matches an explicit E-D-E composition, and that CBC really chains
+rather than repeating ECB.
+
+Upstream status: not submitted. This is a size and toolchain tradeoff specific to
+this device, not a bug in pygp.
+
+diff -Naur a/pygp/_crypto_backend.py b/pygp/_crypto_backend.py
+--- a/pygp/_crypto_backend.py	1970-01-01 00:00:00.000000000 +0000
++++ b/pygp/_crypto_backend.py	2026-07-30 07:50:22.454521989 +0000
+@@ -0,0 +1,328 @@
++"""
++The primitives pygp.crypto needs, provided by pycryptodomex instead of cryptography.
++
++pygp reaches for `cryptography` purely as a primitive provider, and on this device
++that one import is expensive: cryptography's extension module is built with maturin
++against src/rust/Cargo.toml, so having it means carrying a full Rust toolchain
++through the build and another 8-12 MB in a rootfs that lives in RAM.
++
++It is also more than pygp asks for. Across the whole package the only primitives
++actually called are AES and 3DES in ECB/CBC, AES-CMAC, the SHA family, HMAC, and
++os.urandom. Every RSA, DSA, EC and DH helper in pygp.crypto is dead code: nothing
++in pygp, its gp/ layer or its connection/ layer calls one. So this module
++implements the symmetric surface faithfully on pycryptodomex - already in the
++image for pysatochip - and leaves clearly-failing placeholders for the rest.
++
++Shapes match cryptography's API exactly, so pygp.crypto's own function bodies do
++not change: only its import block points here instead.
++"""
++
++import hashlib
++import hmac as _stdlib_hmac
++
++from Cryptodome.Cipher import AES as _AES
++from Cryptodome.Cipher import DES as _DES
++from Cryptodome.Cipher import DES3 as _DES3
++from Cryptodome.Hash import CMAC as _CMAC
++
++
++def default_backend():
++    """cryptography wants a backend passed around; nothing here needs one."""
++    return None
++
++
++#: pygp imports this alongside default_backend and never calls it.
++openssl_backend = None
++
++
++# --------------------------------------------------------------------------- #
++# Ciphers
++# --------------------------------------------------------------------------- #
++
++class _KeyedAlgorithm:
++    def __init__(self, key: bytes):
++        self.key = key
++
++
++class _AESAlgorithm(_KeyedAlgorithm):
++    name = "AES"
++
++
++class _TripleDESAlgorithm(_KeyedAlgorithm):
++    name = "3DES"
++
++    def __init__(self, key: bytes):
++        # cryptography accepts 8, 16 or 24 byte keys here and expands the short
++        # ones itself - 8 becomes K1K1K1, 16 becomes K1K2K1 - so callers can hand
++        # it a single-DES key and get single-DES behaviour out of a 3DES call.
++        # pygp leans on exactly that: DES_CBC and DES_ECB are one-line wrappers
++        # that forward to their DES3 counterparts, and MAC3 passes an 8-byte
++        # key[16:32] to DES_INV_ECB. Expanding the same way keeps those callers
++        # correct; refusing short keys instead would break the MAC3 path only
++        # once it ran against a real card.
++        if len(key) == 8:
++            key = key * 3
++        elif len(key) == 16:
++            key = key + key[:8]
++        elif len(key) != 24:
++            raise ValueError(f"invalid 3DES key length: {len(key)} bytes")
++        super().__init__(key)
++
++
++class algorithms:
++    """Namespace matching `cryptography.hazmat.primitives.ciphers.algorithms`."""
++
++    AES = _AESAlgorithm
++    TripleDES = _TripleDESAlgorithm
++
++
++class ECB:
++    name = "ECB"
++
++
++class CBC:
++    name = "CBC"
++
++    def __init__(self, initialization_vector: bytes):
++        self.initialization_vector = initialization_vector
++
++
++class modes:
++    """Namespace matching `cryptography.hazmat.primitives.ciphers.modes`."""
++
++    ECB = ECB
++    CBC = CBC
++
++
++class _CipherContext:
++    """
++    An encryptor/decryptor pair the way cryptography hands them out.
++
++    update() may be called more than once; pycryptodomex cipher objects keep the
++    CBC chaining state across calls, same as cryptography's contexts. Neither
++    side pads, so finalize() has nothing left to emit.
++    """
++
++    def __init__(self, cipher, encrypt: bool):
++        self._apply = cipher.encrypt if encrypt else cipher.decrypt
++
++    def update(self, data: bytes) -> bytes:
++        return self._apply(data)
++
++    def finalize(self) -> bytes:
++        return b""
++
++
++class Cipher:
++    def __init__(self, algorithm, mode, backend=None):
++        self.algorithm = algorithm
++        self.mode = mode
++
++    def _build(self):
++        algorithm = self.algorithm
++        if isinstance(algorithm, _AESAlgorithm):
++            module, key = _AES, algorithm.key
++        elif isinstance(algorithm, _TripleDESAlgorithm):
++            key = algorithm.key
++            k1, k2, k3 = key[0:8], key[8:16], key[16:24]
++            if k1 == k2 == k3:
++                # A 3DES key whose three parts are equal *is* single DES, and
++                # that is what an expanded 8-byte key looks like. pycryptodomex
++                # rejects it outright ("degenerates to single DES") where
++                # OpenSSL just does the arithmetic, so route it to DES and get
++                # the identical result rather than a spurious ValueError.
++                module, key = _DES, k1
++            else:
++                module, key = _DES3, key
++        else:
++            raise ValueError(f"unsupported algorithm: {algorithm!r}")
++
++        if isinstance(self.mode, ECB):
++            return module.new(key, module.MODE_ECB)
++        if isinstance(self.mode, CBC):
++            return module.new(key, module.MODE_CBC, iv=self.mode.initialization_vector)
++        raise ValueError(f"unsupported mode: {self.mode!r}")
++
++    def encryptor(self) -> _CipherContext:
++        return _CipherContext(self._build(), encrypt=True)
++
++    def decryptor(self) -> _CipherContext:
++        return _CipherContext(self._build(), encrypt=False)
++
++
++# --------------------------------------------------------------------------- #
++# CMAC, hashes, HMAC
++# --------------------------------------------------------------------------- #
++
++class _CMACContext:
++    def __init__(self, algorithm, backend=None):
++        if not isinstance(algorithm, _AESAlgorithm):
++            raise ValueError("CMAC is only used with AES here")
++        self._mac = _CMAC.new(algorithm.key, ciphermod=_AES)
++
++    def update(self, data: bytes) -> None:
++        self._mac.update(data)
++
++    def finalize(self) -> bytes:
++        return self._mac.digest()
++
++
++class cmac:
++    """Namespace matching `cryptography.hazmat.primitives.cmac`."""
++
++    CMAC = _CMACContext
++
++
++class _HashAlgorithm:
++    #: hashlib's name for this algorithm.
++    hashlib_name = ""
++
++
++class _SHA1(_HashAlgorithm):
++    name, hashlib_name = "sha1", "sha1"
++
++
++class _SHA224(_HashAlgorithm):
++    name, hashlib_name = "sha224", "sha224"
++
++
++class _SHA256(_HashAlgorithm):
++    name, hashlib_name = "sha256", "sha256"
++
++
++class _SHA384(_HashAlgorithm):
++    name, hashlib_name = "sha384", "sha384"
++
++
++class _SHA512(_HashAlgorithm):
++    name, hashlib_name = "sha512", "sha512"
++
++
++class _MD5(_HashAlgorithm):
++    name, hashlib_name = "md5", "md5"
++
++
++class _HashContext:
++    def __init__(self, algorithm, backend=None):
++        self._hash = hashlib.new(algorithm.hashlib_name)
++
++    def update(self, data: bytes) -> None:
++        self._hash.update(data)
++
++    def finalize(self) -> bytes:
++        return self._hash.digest()
++
++
++class hashes:
++    """Namespace matching `cryptography.hazmat.primitives.hashes`."""
++
++    Hash = _HashContext
++    SHA1 = _SHA1
++    SHA224 = _SHA224
++    SHA256 = _SHA256
++    SHA384 = _SHA384
++    SHA512 = _SHA512
++    MD5 = _MD5
++
++
++class _HMACContext:
++    def __init__(self, key: bytes, algorithm, backend=None):
++        self._mac = _stdlib_hmac.new(key, digestmod=algorithm.hashlib_name)
++
++    def update(self, data: bytes) -> None:
++        self._mac.update(data)
++
++    def finalize(self) -> bytes:
++        return self._mac.digest()
++
++
++class hmac:
++    """Namespace matching `cryptography.hazmat.primitives.hmac`."""
++
++    HMAC = _HMACContext
++
++
++# --------------------------------------------------------------------------- #
++# The asymmetric names pygp imports but never uses
++# --------------------------------------------------------------------------- #
++
++def _unsupported(path: str) -> NotImplementedError:
++    return NotImplementedError(
++        f"cryptography.{path} is not available in this build.\n"
++        "Only the symmetric primitives GlobalPlatform needs are implemented; "
++        "pygp's RSA/DSA/EC/DH helpers are never called on this device."
++    )
++
++
++class _Placeholder:
++    """
++    A name that may be built but not used.
++
++    pygp.crypto evaluates some of these while it is still being imported:
++    RSA_public_key.verify and friends carry `padding = padding.PKCS1v15()` as a
++    default argument, and default arguments are evaluated at def time. So
++    fetching the attribute and calling it both have to succeed or the module will
++    not import at all.
++
++    Reaching *into* the result is a different matter - that only happens if
++    something genuinely tries to do asymmetric work - so that raises. The point
++    is to keep the failure loud: a placeholder that quietly absorbed every call
++    would let a signature routine return nonsense that looks like a result.
++    """
++
++    def __init__(self, path: str):
++        self._path = path
++
++    def __call__(self, *args, **kwargs):
++        return _Placeholder(self._path + "()")
++
++    def __getattr__(self, attr):
++        if attr.startswith("_"):
++            raise AttributeError(attr)
++        raise _unsupported(f"{self._path}.{attr}")
++
++    def __repr__(self):
++        return f"<unsupported cryptography.{self._path}>"
++
++
++class _Absent:
++    """
++    Stands in for a cryptography module this build does not provide.
++
++    Importing the name has to succeed, because pygp.crypto imports all of them at
++    module scope.
++    """
++
++    def __init__(self, path: str):
++        self._path = path
++
++    def __getattr__(self, attr):
++        if attr.startswith("_"):
++            raise AttributeError(attr)
++        return _Placeholder(f"{self._path}.{attr}")
++
++
++class _ECNamespace(_Absent):
++    class EllipticCurve:
++        """
++        Base class for pygp.crypto's curve table.
++
++        This one has to be real: pygp.crypto subclasses it at import time to
++        declare NISTP256R1, the brainpool curves and friends. They are only ever
++        looked up by name in its CURVE_TYPES dict, never used to compute
++        anything, so an empty base is enough to make the module import.
++        """
++
++        name = ""
++        key_size = 0
++
++
++dsa = _Absent("hazmat.primitives.asymmetric.dsa")
++dh = _Absent("hazmat.primitives.asymmetric.dh")
++rsa = _Absent("hazmat.primitives.asymmetric.rsa")
++padding = _Absent("hazmat.primitives.asymmetric.padding")
++asymmetric_utils = _Absent("hazmat.primitives.asymmetric.utils")
++ec = _ECNamespace("hazmat.primitives.asymmetric.ec")
++utils = _Absent("utils")
++Encoding = _Absent("hazmat.primitives.serialization.Encoding")
++PublicFormat = _Absent("hazmat.primitives.serialization.PublicFormat")
+diff -Naur a/pygp/crypto.py b/pygp/crypto.py
+--- a/pygp/crypto.py	2026-07-30 07:50:22.449005850 +0000
++++ b/pygp/crypto.py	2026-07-30 07:50:22.464127982 +0000
+@@ -4,28 +4,13 @@
+ from pygp.utils import *
+ from pygp.constants import *
+ 
+-from cryptography.hazmat.primitives.ciphers import Cipher, modes
+-from cryptography.hazmat.backends import default_backend
+-from cryptography.hazmat.backends.openssl import backend as openssl_backend
+-from cryptography.hazmat.primitives import cmac
+-from cryptography.hazmat.primitives import hashes
+-from cryptography.hazmat.primitives import hmac
+-from cryptography.hazmat.primitives.asymmetric import dsa
+-from cryptography.hazmat.primitives.asymmetric import dh
+-from cryptography.hazmat.primitives.asymmetric import rsa
+-from cryptography.hazmat.primitives.asymmetric import padding
+-from cryptography.hazmat.primitives.asymmetric import ec
+-from cryptography.hazmat.primitives.asymmetric import utils as asymmetric_utils
+-from cryptography.hazmat.primitives.serialization import Encoding
+-from cryptography.hazmat.primitives.serialization import PublicFormat
+-from cryptography import utils
+-
+-# Try to import algorithms from the new location (cryptography >= 48.0.0)
+-# Fall back to old location for older versions
+-try:
+-    from cryptography.hazmat.decrepit.ciphers import algorithms
+-except ImportError:
+-    from cryptography.hazmat.primitives.ciphers import algorithms
++# Primitives come from pygp._crypto_backend, which implements the symmetric
++# surface pygp actually uses on top of pycryptodomex. See that module for why.
++from pygp._crypto_backend import Cipher, modes, algorithms
++from pygp._crypto_backend import default_backend, openssl_backend
++from pygp._crypto_backend import cmac, hashes, hmac
++from pygp._crypto_backend import dsa, dh, rsa, padding, ec
++from pygp._crypto_backend import asymmetric_utils, Encoding, PublicFormat, utils
+ 
+ 
+ 
