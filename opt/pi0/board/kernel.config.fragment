@@ -15,3 +15,28 @@ CONFIG_SERIAL_AMBA_PL011=y
 # or kernel log sharing it would corrupt APDUs in both directions. cmdline.txt
 # carries no console= either, so nothing else claims it.
 # CONFIG_SERIAL_AMBA_PL011_CONSOLE is not set
+
+# Unix domain sockets, which pcsc-lite is built entirely on top of.
+#
+# pcscd serves its clients through an AF_UNIX socket at /run/pcscd/pcscd.comm,
+# and libpcsclite - so pyscard, so every screen we added - reaches it the same
+# way. With CONFIG_UNIX off, socket(PF_UNIX, SOCK_STREAM, 0) fails outright:
+# pcscd parses reader.conf, opens the SEC1210 on ttyAMA0, then dies in
+# InitializeSocket() at pcscdaemon.c:732, and every client gets
+# SCARD_E_NO_SERVICE. Diagnosed on hardware 2026-07-31 - the device reported
+# exactly "pcscd: 732: Error initializing pcscd." with tty:ok.
+#
+# This is not networking and it does not weaken the no-radio posture: AF_UNIX
+# is local IPC between two processes on this board. No interface, no driver,
+# no firmware - "no brcm firmware blobs" still holds and is still checked.
+#
+# Every board's kernel.config leaves CONFIG_UNIX commented out. pi4-dev only
+# works because its fragment turns it on under "Core networking", for ssh -
+# incidentally, not deliberately. That accident is why card operations were
+# proven on the pi4 rig and never once worked on a pi0.
+#
+# CONFIG_NET is stated because CONFIG_UNIX depends on it. It is already =y in
+# the built config, but an unmet dependency makes kconfig drop the symbol in
+# silence, which is the failure mode this whole file exists to prevent.
+CONFIG_NET=y
+CONFIG_UNIX=y
