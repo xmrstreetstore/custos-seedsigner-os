@@ -189,3 +189,39 @@ find "${TARGET_DIR}" -name '.DS_Store' -print0 | xargs -0 --no-run-if-empty rm -
 SOURCE_DATE_EPOCH=1 PYTHONHASHSEED=0 ${HOST_DIR}/bin/python3.12 \
   "${BUILD_DIR}/python3-3.12.10/Lib/compileall.py" \
   -f --invalidation-mode=checked-hash "${TARGET_DIR}/opt/src"
+
+# ### The combined image: the Orange Kingdom is the shell, the signer is behind a chord.
+# ###
+# ### The game is staged by sesi-quest/integration/seedsigner-os/sync.sh into
+# ### opt/rootfs-overlay-kingdom/, which is listed second in BR2_ROOTFS_OVERLAY so its
+# ### start.sh wins over the signer-only one in the base overlay.
+# ###
+# ### Assert rather than assume. Every way this can go wrong produces a bootable image
+# ### that is simply a plain signer - no error, no missing file anyone would notice
+# ### until a card boots to the wrong application. Failing the build is the only
+# ### feedback that arrives in time.
+# Overlay directories carry a .gitignore each; buildroot rsyncs them to / like any
+# other file. Not harmful, just rootfs litter that costs RAM in an initramfs.
+rm -f "${TARGET_DIR}/.gitignore"
+
+if [ ! -f "${TARGET_DIR}/opt/kingdom/run.py" ]; then
+  echo "ERROR: /opt/kingdom/run.py is missing from the image." >&2
+  echo "       The game was never staged. From the sesi-quest checkout, run:" >&2
+  echo "         ./integration/seedsigner-os/sync.sh <path-to-seedsigner-os>" >&2
+  echo "       (If you meant to build a signer-only image, drop" >&2
+  echo "        ../rootfs-overlay-kingdom/ from BR2_ROOTFS_OVERLAY in pi0_defconfig.)" >&2
+  exit 1
+fi
+
+# start.sh must be the game's launcher, not the base overlay's signer-only one. They
+# differ in that only the game's knows what exit 42 means, so grep for that.
+if ! grep -q 'kingdom' "${TARGET_DIR}/start.sh"; then
+  echo "ERROR: /start.sh is not the combined-image launcher." >&2
+  echo "       The overlay order in BR2_ROOTFS_OVERLAY is wrong, or sync.sh did not" >&2
+  echo "       install it. The game would be on the card but never started." >&2
+  exit 1
+fi
+
+SOURCE_DATE_EPOCH=1 PYTHONHASHSEED=0 ${HOST_DIR}/bin/python3.12 \
+  "${BUILD_DIR}/python3-3.12.10/Lib/compileall.py" \
+  -f --invalidation-mode=checked-hash "${TARGET_DIR}/opt/kingdom"

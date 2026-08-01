@@ -1,0 +1,12 @@
+# The Orange Kingdom is staged into this directory by sesi-quest's
+# integration/seedsigner-os/sync.sh (it drops opt/kingdom/ and start.sh here).
+#
+# None of it is tracked in this repo on purpose. dev/sesi-quest is the game's single
+# source of truth; a second committed copy would drift from it silently, and the
+# drift would only show up as a device behaving like an older build.
+#
+# The directory itself is tracked (via this file) so that BR2_ROOTFS_OVERLAY has
+# something to copy on a fresh checkout, and the build reaches pi0/board/post-build.sh
+# - which asserts the game is actually present and explains how to stage it.
+*
+!.gitignore
