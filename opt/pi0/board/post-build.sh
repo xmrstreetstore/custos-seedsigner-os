@@ -204,24 +204,28 @@ SOURCE_DATE_EPOCH=1 PYTHONHASHSEED=0 ${HOST_DIR}/bin/python3.12 \
 # other file. Not harmful, just rootfs litter that costs RAM in an initramfs.
 rm -f "${TARGET_DIR}/.gitignore"
 
-if [ ! -f "${TARGET_DIR}/opt/kingdom/run.py" ]; then
-  echo "ERROR: /opt/kingdom/run.py is missing from the image." >&2
-  echo "       The game was never staged. From the sesi-quest checkout, run:" >&2
-  echo "         ./integration/seedsigner-os/sync.sh <path-to-seedsigner-os>" >&2
-  echo "       (If you meant to build a signer-only image, drop" >&2
-  echo "        ../rootfs-overlay-kingdom/ from BR2_ROOTFS_OVERLAY in pi0_defconfig.)" >&2
-  exit 1
-fi
+# Only when the game overlay is configured: a signer-only image (Custos alone)
+# is built by dropping ../rootfs-overlay-kingdom/ from BR2_ROOTFS_OVERLAY.
+if grep -q '^BR2_ROOTFS_OVERLAY=.*rootfs-overlay-kingdom' "${BR2_CONFIG}"; then
+  if [ ! -f "${TARGET_DIR}/opt/kingdom/run.py" ]; then
+    echo "ERROR: /opt/kingdom/run.py is missing from the image." >&2
+    echo "       The game was never staged. From the sesi-quest checkout, run:" >&2
+    echo "         ./integration/seedsigner-os/sync.sh <path-to-seedsigner-os>" >&2
+    echo "       (If you meant to build a signer-only image, drop" >&2
+    echo "        ../rootfs-overlay-kingdom/ from BR2_ROOTFS_OVERLAY in pi0_defconfig.)" >&2
+    exit 1
+  fi
 
-# start.sh must be the game's launcher, not the base overlay's signer-only one. They
-# differ in that only the game's knows what exit 42 means, so grep for that.
-if ! grep -q 'kingdom' "${TARGET_DIR}/start.sh"; then
-  echo "ERROR: /start.sh is not the combined-image launcher." >&2
-  echo "       The overlay order in BR2_ROOTFS_OVERLAY is wrong, or sync.sh did not" >&2
-  echo "       install it. The game would be on the card but never started." >&2
-  exit 1
-fi
+  # start.sh must be the game's launcher, not the base overlay's signer-only one. They
+  # differ in that only the game's knows what exit 42 means, so grep for that.
+  if ! grep -q 'kingdom' "${TARGET_DIR}/start.sh"; then
+    echo "ERROR: /start.sh is not the combined-image launcher." >&2
+    echo "       The overlay order in BR2_ROOTFS_OVERLAY is wrong, or sync.sh did not" >&2
+    echo "       install it. The game would be on the card but never started." >&2
+    exit 1
+  fi
 
-SOURCE_DATE_EPOCH=1 PYTHONHASHSEED=0 ${HOST_DIR}/bin/python3.12 \
-  "${BUILD_DIR}/python3-3.12.10/Lib/compileall.py" \
-  -f --invalidation-mode=checked-hash "${TARGET_DIR}/opt/kingdom"
+  SOURCE_DATE_EPOCH=1 PYTHONHASHSEED=0 ${HOST_DIR}/bin/python3.12 \
+    "${BUILD_DIR}/python3-3.12.10/Lib/compileall.py" \
+    -f --invalidation-mode=checked-hash "${TARGET_DIR}/opt/kingdom"
+fi

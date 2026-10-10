@@ -40,3 +40,16 @@ CONFIG_SERIAL_AMBA_PL011=y
 # silence, which is the failure mode this whole file exists to prevent.
 CONFIG_NET=y
 CONFIG_UNIX=y
+
+# I2C for the PN532 NFC reader.
+#
+# libnfc's pn532_i2c driver talks to /dev/i2c-1 from userspace, so the kernel
+# needs the BCM2835 I2C controller and the i2c-dev character device - both
+# commented out in the stock pi0 config. Without them dtparam=i2c_arm=on does
+# nothing and the NFC reader stays inactive with no reason given.
+#
+# The kernel's own NFC stack (CONFIG_NFC) stays off: libnfc drives the chip
+# directly and needs none of it.
+CONFIG_I2C=y
+CONFIG_I2C_BCM2835=y
+CONFIG_I2C_CHARDEV=y

@@ -30,6 +30,10 @@ dtoverlay=disable-bt
 # requirement explicitly rather than depending on that side effect.
 enable_uart=1
 
+# The PN532 NFC reader is on I2C bus 1 (GPIO2 SDA, GPIO3 SCL), since the UART
+# already belongs to the SEC1210. libnfc reaches it as pn532_i2c:/dev/i2c-1.
+dtparam=i2c_arm=on
+
 # Use bcm2835_mmc rather than sdhost, which does not abusively poll when the
 # MicroSD is removed - and SeedSigner is normally run with the card out.
 dtoverlay=mmc

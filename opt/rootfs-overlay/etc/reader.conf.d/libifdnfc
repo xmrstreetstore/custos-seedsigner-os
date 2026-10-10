@@ -1,0 +1,6 @@
+# PN532 NFC reader, served to pcscd through ifdnfc. It starts inactive: the
+# app activates it once pcscd is up (helpers/seedkeeper.py, _activate_nfc),
+# sending the PN532's connstring from /etc/nfc/libnfc.conf.
+FRIENDLYNAME      "IFD-NFC"
+LIBPATH           /usr/lib/libifdnfc.so
+CHANNELID         0
