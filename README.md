@@ -1,5 +1,7 @@
 # Custos OS — operating system
 
+*custōs* · Latin for **guardian, keeper**, the root of the word *custody*.
+
 The operating-system half of [Custos OS](https://custos-os.com): a fork of
 [SeedSigner OS](https://github.com/SeedSigner/seedsigner-os) that adds the
 smartcard stack needed to read and write SeedKeeper cards on a Raspberry Pi Zero,
